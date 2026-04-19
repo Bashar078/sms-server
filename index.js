@@ -66,7 +66,7 @@ app.post("/ivr-menu", (req, res) => {
     timeout: 10,
   });
   gather.say(
-    { voice: "Polly.Amy", language: "en-AU" },
+    { voice: "Polly.Amy-Neural", language: "en-GB"  },
     `Hi, this is ${callerName} calling from ${agencyName}. ` +
     `We are reaching out to homeowners in your area with a market update. ` +
     `Press 1 if you are interested in a free property appraisal. ` +
@@ -91,7 +91,7 @@ app.post("/ivr-response", (req, res) => {
     "4": "Please hold while we connect you to one of our agents.",
   };
   const msg = responses[Digits] || "Sorry, we did not receive your selection. Please try again.";
-  twiml.say({ voice: "Polly.Amy", language: "en-AU" }, msg);
+  twiml.say({voice: "Polly.Amy-Neural", language: "en-GB" }, msg);
   twiml.hangup();
   res.type("text/xml").send(twiml.toString());
 });
