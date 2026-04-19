@@ -3,7 +3,15 @@ const twilio = require("twilio");
 const cors = require("cors");
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+app.options("*", cors());
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -57,18 +65,19 @@ app.post("/ivr-menu", (req, res) => {
     action: "/ivr-response",
     timeout: 10,
   });
-  gather.say({
-    voice: "Polly.Amy",
-    language: "en-AU",
-  },
-  `Hi, this is ${callerName} calling from ${agencyName}. ` +
-  `We are reaching out to homeowners in your area with a market update. ` +
-  `Press 1 if you are interested in a free property appraisal. ` +
-  `Press 2 to receive recent sold prices in your suburb by SMS. ` +
-  `Press 3 to be removed from our list. ` +
-  `Press 4 to speak with one of our agents.`
+  gather.say(
+    { voice: "Polly.Amy", language: "en-AU" },
+    `Hi, this is ${callerName} calling from ${agencyName}. ` +
+    `We are reaching out to homeowners in your area with a market update. ` +
+    `Press 1 if you are interested in a free property appraisal. ` +
+    `Press 2 to receive recent sold prices in your suburb by SMS. ` +
+    `Press 3 to be removed from our list. ` +
+    `Press 4 to speak with one of our agents.`
   );
-  twiml.redirect("/ivr-menu?agencyName=" + encodeURIComponent(agencyName) + "&callerName=" + encodeURIComponent(callerName));
+  twiml.redirect(
+    "/ivr-menu?agencyName=" + encodeURIComponent(agencyName) +
+    "&callerName=" + encodeURIComponent(callerName)
+  );
   res.type("text/xml").send(twiml.toString());
 });
 
