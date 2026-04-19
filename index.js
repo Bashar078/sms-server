@@ -65,8 +65,8 @@ app.post("/ivr-menu", (req, res) => {
     action: "/ivr-response",
     timeout: 10,
   });
- gather.say(
-  { voice: "Polly.Amy", language: "en-AU" }
+  gather.say(
+    { voice: "Polly.Amy", language: "en-AU" },
     `Hi, this is ${callerName} calling from ${agencyName}. ` +
     `We are reaching out to homeowners in your area with a market update. ` +
     `Press 1 if you are interested in a free property appraisal. ` +
