@@ -1,6 +1,7 @@
 const express = require("express");
 const twilio = require("twilio");
 const cors = require("cors");
+const https = require("https");
 
 const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["Content-Type"] }));
@@ -8,25 +9,76 @@ app.options("*", cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// ── In-memory log store ──────────────────────────
 const callLogs = [];
+
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "tyepWYJJwJM9TTFIg5U7";
 
 app.get("/", (req, res) => {
   res.send("SMS server is running");
 });
 
-// ── Get all logs ─────────────────────────────────
 app.get("/get-logs", (req, res) => {
   res.json({ logs: callLogs });
 });
 
-// ── Clear logs ───────────────────────────────────
 app.post("/clear-logs", (req, res) => {
   callLogs.length = 0;
   res.json({ success: true });
 });
 
-// ── Make outbound call ───────────────────────────
+app.post("/update-log", (req, res) => {
+  const { id, agentNote, agentAction } = req.body;
+  const log = callLogs.find(l => l.id === id);
+  if (log) {
+    if (agentNote !== undefined) log.agentNote = agentNote;
+    if (agentAction !== undefined) log.agentAction = agentAction;
+  }
+  res.json({ success: true });
+});
+
+// ── Generate ElevenLabs audio and return as URL ──
+async function generateVoiceAudio(text) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      text,
+      model_id: "eleven_multilingual_v2",
+      voice_settings: {
+        stability: 0.5,
+        similarity_boost: 0.85,
+        style: 0.3,
+        use_speaker_boost: true
+      }
+    });
+
+    const options = {
+      hostname: "api.elevenlabs.io",
+      path: `/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+        "Content-Length": Buffer.byteLength(body)
+      }
+    };
+
+    const chunks = [];
+    const req = https.request(options, (res) => {
+      res.on("data", chunk => chunks.push(chunk));
+      res.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        const base64 = buffer.toString("base64");
+        resolve(base64);
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Make outbound call ──
 app.post("/make-call", async (req, res) => {
   const { to, accountSid, authToken, from, agencyName, callerName, serverUrl, leadName } = req.body;
   if (!to || !accountSid || !authToken || !from) {
@@ -37,12 +89,11 @@ app.post("/make-call", async (req, res) => {
     const call = await client.calls.create({
       to,
       from,
-      url: `${serverUrl}/ivr-menu?agencyName=${encodeURIComponent(agencyName)}&callerName=${encodeURIComponent(callerName)}&leadName=${encodeURIComponent(leadName||"")}&serverUrl=${encodeURIComponent(serverUrl)}`,
-      statusCallback: `${serverUrl}/call-status?to=${encodeURIComponent(to)}&leadName=${encodeURIComponent(leadName||"")}`,
+      url: `${serverUrl}/ivr-menu?agencyName=${encodeURIComponent(agencyName)}&callerName=${encodeURIComponent(callerName)}&leadName=${encodeURIComponent(leadName || "")}&serverUrl=${encodeURIComponent(serverUrl)}`,
+      statusCallback: `${serverUrl}/call-status?to=${encodeURIComponent(to)}&leadName=${encodeURIComponent(leadName || "")}`,
       statusCallbackMethod: "POST",
     });
 
-    // Log as pending
     callLogs.unshift({
       id: call.sid,
       name: leadName || to,
@@ -60,30 +111,44 @@ app.post("/make-call", async (req, res) => {
   }
 });
 
-// ── IVR menu ─────────────────────────────────────
-app.post("/ivr-menu", (req, res) => {
+// ── IVR menu using ElevenLabs ──
+app.post("/ivr-menu", async (req, res) => {
   const { agencyName, callerName, leadName, serverUrl } = req.query;
-  const twiml = new twilio.twiml.VoiceResponse();
-  const gather = twiml.gather({
-    numDigits: 1,
-    action: `/ivr-response?leadName=${encodeURIComponent(leadName||"")}&serverUrl=${encodeURIComponent(serverUrl||"")}`,
-    timeout: 10,
-  });
-  gather.say(
-    { voice: "Polly.Amy-Neural", language: "en-GB" },
+
+  const script =
     `Hi, this is ${callerName} calling from ${agencyName}. ` +
     `We are reaching out to homeowners in your area with a free market update. ` +
     `Press 1 if you are interested in a free property appraisal. ` +
     `Press 2 to receive recent sold prices in your suburb by SMS. ` +
     `Press 3 to be removed from our contact list. ` +
-    `Press 4 to speak directly with one of our agents.`
-  );
-  twiml.redirect(`/ivr-menu?agencyName=${encodeURIComponent(agencyName)}&callerName=${encodeURIComponent(callerName)}&leadName=${encodeURIComponent(leadName||"")}&serverUrl=${encodeURIComponent(serverUrl||"")}`);
+    `Press 4 to speak directly with one of our agents.`;
+
+  const twiml = new twilio.twiml.VoiceResponse();
+
+  try {
+    const audioBase64 = await generateVoiceAudio(script);
+    const gather = twiml.gather({
+      numDigits: 1,
+      action: `/ivr-response?leadName=${encodeURIComponent(leadName || "")}&serverUrl=${encodeURIComponent(serverUrl || "")}`,
+      timeout: 10,
+    });
+    gather.play({ loop: 1 }, `data:audio/mpeg;base64,${audioBase64}`);
+  } catch (e) {
+    // Fallback to Polly if ElevenLabs fails
+    const gather = twiml.gather({
+      numDigits: 1,
+      action: `/ivr-response?leadName=${encodeURIComponent(leadName || "")}&serverUrl=${encodeURIComponent(serverUrl || "")}`,
+      timeout: 10,
+    });
+    gather.say({ voice: "Polly.Amy-Neural", language: "en-GB" }, script);
+  }
+
+  twiml.redirect(`/ivr-menu?agencyName=${encodeURIComponent(agencyName)}&callerName=${encodeURIComponent(callerName)}&leadName=${encodeURIComponent(leadName || "")}&serverUrl=${encodeURIComponent(serverUrl || "")}`);
   res.type("text/xml").send(twiml.toString());
 });
 
-// ── Handle keypress ──────────────────────────────
-app.post("/ivr-response", (req, res) => {
+// ── Handle keypress ──
+app.post("/ivr-response", async (req, res) => {
   const { Digits, To } = req.body;
   const { leadName } = req.query;
 
@@ -96,7 +161,6 @@ app.post("/ivr-response", (req, res) => {
 
   const result = responses[Digits] || { msg: "Sorry, we did not receive your selection. Please call us back at your convenience.", action: "NO_RESPONSE" };
 
-  // Update log
   const log = callLogs.find(l => l.name === (leadName || To) || l.phone === To);
   if (log) {
     log.status = "completed";
@@ -105,16 +169,22 @@ app.post("/ivr-response", (req, res) => {
   }
 
   const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say({ voice: "Polly.Amy-Neural", language: "en-GB" }, result.msg);
+
+  try {
+    const audioBase64 = await generateVoiceAudio(result.msg);
+    twiml.play({ loop: 1 }, `data:audio/mpeg;base64,${audioBase64}`);
+  } catch (e) {
+    twiml.say({ voice: "Polly.Amy-Neural", language: "en-GB" }, result.msg);
+  }
+
   twiml.hangup();
   res.type("text/xml").send(twiml.toString());
 });
 
-// ── Call status updates ──────────────────────────
+// ── Call status ──
 app.post("/call-status", (req, res) => {
   const { CallStatus } = req.body;
   const { to, leadName } = req.query;
-
   if (CallStatus === "no-answer" || CallStatus === "busy" || CallStatus === "failed") {
     const log = callLogs.find(l => l.phone === to || l.name === leadName);
     if (log) {
@@ -125,18 +195,7 @@ app.post("/call-status", (req, res) => {
   res.sendStatus(200);
 });
 
-// ── Update agent note & mark actioned ────────────
-app.post("/update-log", (req, res) => {
-  const { id, agentNote, agentAction } = req.body;
-  const log = callLogs.find(l => l.id === id);
-  if (log) {
-    if (agentNote !== undefined) log.agentNote = agentNote;
-    if (agentAction !== undefined) log.agentAction = agentAction;
-  }
-  res.json({ success: true });
-});
-
-// ── Send SMS ─────────────────────────────────────
+// ── Send SMS ──
 app.post("/send-sms", async (req, res) => {
   const { to, message, accountSid, authToken, from } = req.body;
   if (!to || !message || !accountSid || !authToken || !from) {
