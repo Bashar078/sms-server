@@ -50,11 +50,28 @@ function generateAudio(text, filename) {
       }
     };
     const filePath = "./audio/" + filename + ".mp3";
-    const file = fs.createWriteStream(filePath);
-    const req = https.request(options, function(res) {
-      res.pipe(file);
+    const chunks = [];
+    const req = https.request(options, function(response) {
+      console.log("ElevenLabs status:", response.statusCode);
+      if (response.statusCode !== 200) {
+        response.on("data", chunk => chunks.push(chunk));
+        response.on("end", () => {
+          const errorBody = Buffer.concat(chunks).toString();
+          console.log("ElevenLabs error body:", errorBody);
+          reject(new Error("ElevenLabs returned status " + response.statusCode + ": " + errorBody));
+        });
+        return;
+      }
+      const file = fs.createWriteStream(filePath);
+      response.pipe(file);
       file.on("finish", function() {
         file.close();
+        const stats = fs.statSync(filePath);
+        console.log("Audio file size:", stats.size, "bytes");
+        if (stats.size < 1000) {
+          reject(new Error("Audio file too small - likely corrupt"));
+          return;
+        }
         resolve(filePath);
       });
     });
