@@ -15,6 +15,9 @@ app.use("/audio", express.static("./audio"));
 
 const callLogs = [];
 
+const ELEVENLABS_API_KEY = "sk_bd96bb5028e37a1559e4f9cfd4c5735753e23bc18d63cd6b";
+const ELEVENLABS_VOICE_ID = "tyepWYJJwJM9TTFIg5U7";
+
 app.get("/", (req, res) => res.send("SMS server is running"));
 app.get("/get-logs", (req, res) => res.json({ logs: callLogs }));
 app.post("/clear-logs", (req, res) => { callLogs.length = 0; res.json({ success: true }); });
@@ -30,8 +33,6 @@ app.post("/update-log", (req, res) => {
 
 function generateAudio(text, filename) {
   return new Promise((resolve, reject) => {
-    const apiKey = process.env.ELEVENLABS_API_KEY;
-    const voiceId = process.env.ELEVENLABS_VOICE_ID || "tyepWYJJwJM9TTFIg5U7";
     const body = JSON.stringify({
       text: text,
       model_id: "eleven_multilingual_v2",
@@ -39,10 +40,10 @@ function generateAudio(text, filename) {
     });
     const options = {
       hostname: "api.elevenlabs.io",
-      path: "/v1/text-to-speech/" + voiceId,
+      path: "/v1/text-to-speech/" + ELEVENLABS_VOICE_ID,
       method: "POST",
       headers: {
-        "xi-api-key": apiKey,
+        "xi-api-key": ELEVENLABS_API_KEY,
         "Content-Type": "application/json",
         "Accept": "audio/mpeg",
         "Content-Length": Buffer.byteLength(body)
