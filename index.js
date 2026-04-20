@@ -2,25 +2,25 @@ const express = require("express");
 const twilio = require("twilio");
 const cors = require("cors");
 const https = require("https");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["Content-Type"] }));
 app.options("*", cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+app.use("/audio", express.static(path.join(__dirname, "audio")));
+
+if (!fs.existsSync("./audio")) fs.mkdirSync("./audio");
 
 const callLogs = [];
-
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "tyepWYJJwJM9TTFIg5U7";
 
-app.get("/", (req, res) => {
-  res.send("SMS server is running");
-});
+app.get("/", (req, res) => res.send("SMS server is running"));
 
-app.get("/get-logs", (req, res) => {
-  res.json({ logs: callLogs });
-});
+app.get("/get-logs", (req, res) => res.json({ logs: callLogs }));
 
 app.post("/clear-logs", (req, res) => {
   callLogs.length = 0;
@@ -37,8 +37,8 @@ app.post("/update-log", (req, res) => {
   res.json({ success: true });
 });
 
-// ── Generate ElevenLabs audio and return as URL ──
-async function generateVoiceAudio(text) {
+// ── Generate ElevenLabs audio and save to file ──
+async function generateAudioFile(text, filename) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       text,
@@ -63,13 +63,14 @@ async function generateVoiceAudio(text) {
       }
     };
 
-    const chunks = [];
+    const filePath = `./audio/${filename}.mp3`;
+    const fileStream = fs.createWriteStream(filePath);
+
     const req = https.request(options, (res) => {
-      res.on("data", chunk => chunks.push(chunk));
-      res.on("end", () => {
-        const buffer = Buffer.concat(chunks);
-        const base64 = buffer.toString("base64");
-        resolve(base64);
+      res.pipe(fileStream);
+      fileStream.on("finish", () => {
+        fileStream.close();
+        resolve(filePath);
       });
     });
     req.on("error", reject);
@@ -111,7 +112,7 @@ app.post("/make-call", async (req, res) => {
   }
 });
 
-// ── IVR menu using ElevenLabs ──
+// ── IVR menu ──
 app.post("/ivr-menu", async (req, res) => {
   const { agencyName, callerName, leadName, serverUrl } = req.query;
 
@@ -126,15 +127,18 @@ app.post("/ivr-menu", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
   try {
-    const audioBase64 = await generateVoiceAudio(script);
+    const filename = `menu_${Date.now()}`;
+    await generateAudioFile(script, filename);
+    const audioUrl = `${serverUrl}/audio/${filename}.mp3`;
+
     const gather = twiml.gather({
       numDigits: 1,
       action: `/ivr-response?leadName=${encodeURIComponent(leadName || "")}&serverUrl=${encodeURIComponent(serverUrl || "")}`,
       timeout: 10,
     });
-    gather.play({ loop: 1 }, `data:audio/mpeg;base64,${audioBase64}`);
+    gather.play(audioUrl);
   } catch (e) {
-    // Fallback to Polly if ElevenLabs fails
+    console.error("ElevenLabs error:", e.message);
     const gather = twiml.gather({
       numDigits: 1,
       action: `/ivr-response?leadName=${encodeURIComponent(leadName || "")}&serverUrl=${encodeURIComponent(serverUrl || "")}`,
@@ -150,7 +154,7 @@ app.post("/ivr-menu", async (req, res) => {
 // ── Handle keypress ──
 app.post("/ivr-response", async (req, res) => {
   const { Digits, To } = req.body;
-  const { leadName } = req.query;
+  const { leadName, serverUrl } = req.query;
 
   const responses = {
     "1": { msg: "Fantastic. One of our agents will be in touch shortly to arrange your free appraisal. Have a great day.", action: "HOT_LEAD" },
@@ -171,8 +175,10 @@ app.post("/ivr-response", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
   try {
-    const audioBase64 = await generateVoiceAudio(result.msg);
-    twiml.play({ loop: 1 }, `data:audio/mpeg;base64,${audioBase64}`);
+    const filename = `response_${Date.now()}`;
+    await generateAudioFile(result.msg, filename);
+    const audioUrl = `${serverUrl}/audio/${filename}.mp3`;
+    twiml.play(audioUrl);
   } catch (e) {
     twiml.say({ voice: "Polly.Amy-Neural", language: "en-GB" }, result.msg);
   }
