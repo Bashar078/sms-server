@@ -96,7 +96,7 @@ app.post("/make-call", async (req, res) => {
   }
 });
 
-app.post("/ivr-menu", async (req, res) => {
+app.all("/ivr-menu", async (req, res) => {
   const agencyName = req.query.agencyName || "";
   const callerName = req.query.callerName || "";
   const leadName = req.query.leadName || "";
@@ -136,9 +136,9 @@ app.post("/ivr-menu", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-app.post("/ivr-response", async (req, res) => {
-  const digits = req.body.Digits;
-  const to = req.body.To;
+app.all("/ivr-response", async (req, res) => {
+  const digits = req.body.Digits || req.query.Digits;
+  const to = req.body.To || req.query.To || "";
   const leadName = req.query.leadName || "";
   const serverUrl = req.query.serverUrl || "";
 
