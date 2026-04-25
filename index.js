@@ -1,5 +1,4 @@
 const express = require("express");
-const twilio = require("twilio");
 const cors = require("cors");
 const https = require("https");
 
@@ -9,61 +8,12 @@ app.options("*", cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+const ELEVENLABS_API_KEY = "sk_bd96bb5028e37a1559e4f9cfd4c5735753e23bc18d63cd6b";
+const ELEVENLABS_AGENT_ID = "agent_2501kq11r2bkesqv4b0a43a0grav";
+
 const callLogs = [];
 
-const ELEVENLABS_API_KEY = "sk_bd96bb5028e37a1559e4f9cfd4c5735753e23bc18d63cd6b";
-const ELEVENLABS_VOICE_ID = "tyepWYJJwJM9TTFIg5U7";
-const SERVER_URL = process.env.SERVER_URL || "https://sms-server-zvfd.onrender.com";
-
-const MENU_SCRIPT =
-  "Hi, we are reaching out to homeowners in your area with a free market update. " +
-  "Press 1 if you are interested in a free property appraisal. " +
-  "Press 2 to receive recent sold prices in your suburb by SMS. " +
-  "Press 3 to be removed from our contact list. " +
-  "Press 4 to speak directly with one of our agents.";
-
-const RESPONSE_SCRIPTS = {
-  "1": { msg: "Fantastic. One of our agents will be in touch shortly to arrange your free appraisal. Have a great day.", action: "HOT_LEAD" },
-  "2": { msg: "No problem. We will send you the latest sold prices in your suburb by SMS shortly. Have a great day.", action: "SEND_INFO" },
-  "3": { msg: "Understood. We will remove you from our contact list immediately. Have a great day.", action: "REMOVE" },
-  "4": { msg: "Please hold briefly while we connect you with one of our agents.", action: "CALLBACK" }
-};
-
-// ── Stream ElevenLabs audio directly to response ──
-function streamElevenLabs(text, res) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      text: text,
-      model_id: "eleven_turbo_v2",
-      voice_settings: { stability: 0.5, similarity_boost: 0.85 }
-    });
-    const options = {
-      hostname: "api.elevenlabs.io",
-      path: "/v1/text-to-speech/" + ELEVENLABS_VOICE_ID + "/stream",
-      method: "POST",
-      headers: {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg",
-        "Content-Length": Buffer.byteLength(body)
-      }
-    };
-    const req = https.request(options, function(elResponse) {
-      if (elResponse.statusCode !== 200) {
-        reject(new Error("ElevenLabs status " + elResponse.statusCode));
-        return;
-      }
-      res.setHeader("Content-Type", "audio/mpeg");
-      elResponse.pipe(res);
-      elResponse.on("end", resolve);
-    });
-    req.on("error", reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-app.get("/", (req, res) => res.send("SMS server is running"));
+app.get("/", (req, res) => res.send("CallerIQ server running"));
 app.get("/get-logs", (req, res) => res.json({ logs: callLogs }));
 app.post("/clear-logs", (req, res) => { callLogs.length = 0; res.json({ success: true }); });
 app.post("/update-log", (req, res) => {
@@ -76,114 +26,130 @@ app.post("/update-log", (req, res) => {
   res.json({ success: true });
 });
 
-// ── Audio endpoints — Twilio fetches these ──
-app.get("/audio/menu", async (req, res) => {
-  try {
-    await streamElevenLabs(MENU_SCRIPT, res);
-  } catch (e) {
-    console.log("ElevenLabs error:", e.message);
-    res.status(500).send("Audio error");
-  }
-});
-
-app.get("/audio/response/:digit", async (req, res) => {
-  const digit = req.params.digit;
-  const script = RESPONSE_SCRIPTS[digit];
-  const text = script ? script.msg : "Sorry, we did not receive your selection.";
-  try {
-    await streamElevenLabs(text, res);
-  } catch (e) {
-    res.status(500).send("Audio error");
-  }
-});
-
+// ── Make outbound call via ElevenLabs ──
 app.post("/make-call", async (req, res) => {
-  const { to, accountSid, authToken, from, agencyName, callerName, serverUrl, leadName } = req.body;
-  if (!to || !accountSid || !authToken || !from) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
+  const { to, leadName, agentId } = req.body;
+  if (!to) return res.status(400).json({ error: "Missing phone number" });
+
+  const body = JSON.stringify({
+    agent_id: agentId || ELEVENLABS_AGENT_ID,
+    agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID || "",
+    to_number: to,
+    conversation_initiation_client_data: {
+      dynamic_variables: {
+        lead_name: leadName || "there",
+      }
+    }
+  });
+
+  const options = {
+    hostname: "api.elevenlabs.io",
+    path: "/v1/convai/twilio/outbound-call",
+    method: "POST",
+    headers: {
+      "xi-api-key": ELEVENLABS_API_KEY,
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body)
+    }
+  };
+
   try {
-    const client = twilio(accountSid, authToken);
-    const url = (serverUrl || SERVER_URL) + "/ivr-menu?leadName=" + encodeURIComponent(leadName || "") + "&serverUrl=" + encodeURIComponent(serverUrl || SERVER_URL);
-    const call = await client.calls.create({
-      to: to,
-      from: from,
-      url: url,
-      statusCallback: (serverUrl || SERVER_URL) + "/call-status?to=" + encodeURIComponent(to) + "&leadName=" + encodeURIComponent(leadName || ""),
-      statusCallbackMethod: "POST"
+    const result = await new Promise((resolve, reject) => {
+      const chunks = [];
+      const request = https.request(options, function(response) {
+        response.on("data", chunk => chunks.push(chunk));
+        response.on("end", () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch(e) {
+            resolve({ raw: Buffer.concat(chunks).toString() });
+          }
+        });
+      });
+      request.on("error", reject);
+      request.write(body);
+      request.end();
     });
-    callLogs.unshift({
-      id: call.sid,
-      name: leadName || to,
-      phone: to,
-      status: "calling",
-      response: null,
-      action: null,
-      agentNote: "",
-      time: new Date().toLocaleString("en-AU")
-    });
-    res.json({ success: true, callSid: call.sid });
+
+    console.log("ElevenLabs response:", JSON.stringify(result));
+
+    if (result.callSid || result.call_sid || result.id || result.conversation_id) {
+      const callId = result.callSid || result.call_sid || result.id || result.conversation_id;
+      callLogs.unshift({
+        id: callId,
+        name: leadName || to,
+        phone: to,
+        status: "calling",
+        response: null,
+        action: null,
+        transcript: "",
+        agentNote: "",
+        time: new Date().toLocaleString("en-AU")
+      });
+      res.json({ success: true, callId });
+    } else {
+      console.log("Unexpected response:", result);
+      res.status(500).json({ error: "Unexpected response from ElevenLabs", details: result });
+    }
   } catch (err) {
+    console.log("Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.all("/ivr-menu", async (req, res) => {
-  const leadName = req.query.leadName || "";
-  const serverUrl = req.query.serverUrl || SERVER_URL;
-  const twiml = new twilio.twiml.VoiceResponse();
-  const gather = twiml.gather({
-    numDigits: "1",
-    action: "/ivr-response?leadName=" + encodeURIComponent(leadName) + "&serverUrl=" + encodeURIComponent(serverUrl),
-    timeout: "10"
-  });
-  gather.play(serverUrl + "/audio/menu");
-  twiml.redirect("/ivr-menu?leadName=" + encodeURIComponent(leadName) + "&serverUrl=" + encodeURIComponent(serverUrl));
-  res.type("text/xml").send(twiml.toString());
-});
+// ── ElevenLabs webhook — receives call results ──
+app.post("/webhook", (req, res) => {
+  const event = req.body;
+  console.log("Webhook received:", JSON.stringify(event));
 
-app.all("/ivr-response", async (req, res) => {
-  const digits = req.body.Digits || req.query.Digits;
-  const to = req.body.To || req.query.To || "";
-  const leadName = req.query.leadName || "";
-  const serverUrl = req.query.serverUrl || SERVER_URL;
-  const result = RESPONSE_SCRIPTS[digits] || { msg: "Sorry, we did not receive your selection.", action: "NO_RESPONSE" };
+  if (event.type === "conversation_ended" || event.type === "call_ended") {
+    const callId = event.conversation_id || event.call_sid;
+    const transcript = event.transcript || event.summary || "";
+    const outcome = detectOutcome(transcript);
 
-  const log = callLogs.find(function(l) { return l.name === (leadName || to) || l.phone === to; });
-  if (log) {
-    log.status = "completed";
-    log.response = digits;
-    log.action = result.action;
-  }
-
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.play(serverUrl + "/audio/response/" + (digits || "default"));
-  twiml.hangup();
-  res.type("text/xml").send(twiml.toString());
-});
-
-app.post("/call-status", (req, res) => {
-  const status = req.body.CallStatus;
-  const to = req.query.to || "";
-  const leadName = req.query.leadName || "";
-  if (status === "no-answer" || status === "busy" || status === "failed") {
-    const log = callLogs.find(function(l) { return l.phone === to || l.name === leadName; });
+    const log = callLogs.find(l => l.id === callId);
     if (log) {
       log.status = "completed";
-      log.action = "NO_ANSWER";
+      log.transcript = transcript;
+      log.action = outcome;
+    } else {
+      callLogs.unshift({
+        id: callId,
+        name: event.to || "Unknown",
+        phone: event.to || "",
+        status: "completed",
+        transcript: transcript,
+        action: outcome,
+        agentNote: "",
+        time: new Date().toLocaleString("en-AU")
+      });
     }
   }
   res.sendStatus(200);
 });
 
+// ── Detect outcome from transcript ──
+function detectOutcome(transcript) {
+  if (!transcript) return "NO_ANSWER";
+  const t = transcript.toLowerCase();
+  if (t.includes("remove") || t.includes("don't call") || t.includes("do not call")) return "REMOVE";
+  if (t.includes("call me back") || t.includes("speak to") || t.includes("agent")) return "CALLBACK";
+  if (t.includes("yes") && (t.includes("apprais") || t.includes("interest") || t.includes("sure"))) return "HOT_LEAD";
+  if (t.includes("sms") || t.includes("prices") || t.includes("sold")) return "SEND_INFO";
+  if (t.includes("no") || t.includes("not interested") || t.includes("busy")) return "NOT_INTERESTED";
+  return "NO_ANSWER";
+}
+
+// ── Send SMS (still uses Twilio) ──
 app.post("/send-sms", async (req, res) => {
   const { to, message, accountSid, authToken, from } = req.body;
   if (!to || !message || !accountSid || !authToken || !from) {
     return res.status(400).json({ error: "Missing required fields" });
   }
   try {
+    const twilio = require("twilio");
     const client = twilio(accountSid, authToken);
-    const result = await client.messages.create({ body: message, from: from, to: to });
+    const result = await client.messages.create({ body: message, from, to });
     res.json({ success: true, sid: result.sid });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -191,4 +157,4 @@ app.post("/send-sms", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, function() { console.log("Server running on port " + PORT); });
+app.listen(PORT, function() { console.log("CallerIQ server running on port " + PORT); });
