@@ -8,7 +8,7 @@ app.options("*", cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-const const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "sk_a9dcad743a0e2c1a6ac70b9e12ad361ad45252e324ab0622";
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "sk_a9dcad743a0e2c1a6ac70b9e12ad361ad45252e324ab0622";
 const ELEVENLABS_AGENT_ID = "agent_2501kq11r2bkesqv4b0a43a0grav";
 const ELEVENLABS_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID || "phnum_7301kq26v30mfvbbk04rysa2hqa5";
 
