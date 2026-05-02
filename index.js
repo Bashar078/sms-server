@@ -10,12 +10,18 @@ app.use(express.urlencoded({ extended: false }));
 
 const ELEVENLABS_API_KEY = "sk_bd96bb5028e37a1559e4f9cfd4c5735753e23bc18d63cd6b";
 const ELEVENLABS_AGENT_ID = "agent_2501kq11r2bkesqv4b0a43a0grav";
+const ELEVENLABS_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID || "phnum_7301kq26v30mfvbbk04rysa2hqa5";
 
 const callLogs = [];
 
 app.get("/", (req, res) => res.send("CallerIQ server running"));
 app.get("/get-logs", (req, res) => res.json({ logs: callLogs }));
-app.post("/clear-logs", (req, res) => { callLogs.length = 0; res.json({ success: true }); });
+
+app.post("/clear-logs", (req, res) => {
+  callLogs.length = 0;
+  res.json({ success: true });
+});
+
 app.post("/update-log", (req, res) => {
   const { id, agentNote, agentAction } = req.body;
   const log = callLogs.find(l => l.id === id);
@@ -26,25 +32,47 @@ app.post("/update-log", (req, res) => {
   res.json({ success: true });
 });
 
-// ── Make outbound call via ElevenLabs ──
+function makeRequest(options, body) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const req = https.request(options, function(response) {
+      response.on("data", chunk => chunks.push(chunk));
+      response.on("end", () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString()));
+        } catch(e) {
+          resolve({ raw: Buffer.concat(chunks).toString() });
+        }
+      });
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 app.post("/make-call", async (req, res) => {
   const { to, leadName, agentId } = req.body;
   if (!to) return res.status(400).json({ error: "Missing phone number" });
 
+  // Format number correctly
+  let toNumber = to.toString().trim();
+  if (!toNumber.startsWith('+')) toNumber = '+' + toNumber;
+
   const body = JSON.stringify({
     agent_id: agentId || ELEVENLABS_AGENT_ID,
-    agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID || "",
-    to_number: to,
+    agent_phone_number_id: ELEVENLABS_PHONE_NUMBER_ID,
+    to_number: toNumber,
     conversation_initiation_client_data: {
       dynamic_variables: {
-        lead_name: leadName || "there",
+        lead_name: leadName || "there"
       }
     }
   });
 
   const options = {
     hostname: "api.elevenlabs.io",
-    path: "/v1/convai/twilio/outbound-call",
+    path: "/v1/convai/sip-trunk/outbound-call",
     method: "POST",
     headers: {
       "xi-api-key": ELEVENLABS_API_KEY,
@@ -54,31 +82,15 @@ app.post("/make-call", async (req, res) => {
   };
 
   try {
-    const result = await new Promise((resolve, reject) => {
-      const chunks = [];
-      const request = https.request(options, function(response) {
-        response.on("data", chunk => chunks.push(chunk));
-        response.on("end", () => {
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString()));
-          } catch(e) {
-            resolve({ raw: Buffer.concat(chunks).toString() });
-          }
-        });
-      });
-      request.on("error", reject);
-      request.write(body);
-      request.end();
-    });
+    const result = await makeRequest(options, body);
+    console.log("ElevenLabs SIP response:", JSON.stringify(result));
 
-    console.log("ElevenLabs response:", JSON.stringify(result));
-
-    if (result.callSid || result.call_sid || result.id || result.conversation_id) {
-      const callId = result.callSid || result.call_sid || result.id || result.conversation_id;
+    if (result.conversation_id || result.callSid || result.call_sid || result.id) {
+      const callId = result.conversation_id || result.callSid || result.call_sid || result.id;
       callLogs.unshift({
         id: callId,
-        name: leadName || to,
-        phone: to,
+        name: leadName || toNumber,
+        phone: toNumber,
         status: "calling",
         response: null,
         action: null,
@@ -97,50 +109,59 @@ app.post("/make-call", async (req, res) => {
   }
 });
 
-// ── ElevenLabs webhook — receives call results ──
 app.post("/webhook", (req, res) => {
   const event = req.body;
-  console.log("Webhook received:", JSON.stringify(event));
+  console.log("Webhook received type:", event.type);
 
-  if (event.type === "conversation_ended" || event.type === "call_ended") {
-    const callId = event.conversation_id || event.call_sid;
-    const transcript = event.transcript || event.summary || "";
-    const outcome = detectOutcome(transcript);
+  if (event.type === "post_call_transcription") {
+    const data = event.data || {};
+    const callId = data.conversation_id || event.conversation_id;
+    const transcript = data.transcript || [];
+    const summary = data.analysis?.transcript_summary || "";
+    const status = data.analysis?.call_successful || "unknown";
+
+    const transcriptText = transcript
+      .map(t => `${t.role === "agent" ? "Sarah" : "Lead"}: ${t.message}`)
+      .join("\n");
+
+    const outcome = detectOutcome(transcriptText);
 
     const log = callLogs.find(l => l.id === callId);
     if (log) {
       log.status = "completed";
-      log.transcript = transcript;
+      log.transcript = transcriptText;
+      log.summary = summary;
       log.action = outcome;
     } else {
+      const phone = data.metadata?.phone_call?.external_number || "";
       callLogs.unshift({
         id: callId,
-        name: event.to || "Unknown",
-        phone: event.to || "",
+        name: phone,
+        phone: phone,
         status: "completed",
-        transcript: transcript,
+        transcript: transcriptText,
+        summary: summary,
         action: outcome,
         agentNote: "",
         time: new Date().toLocaleString("en-AU")
       });
     }
+    console.log("Call logged — outcome:", outcome, "— summary:", summary);
   }
   res.sendStatus(200);
 });
 
-// ── Detect outcome from transcript ──
 function detectOutcome(transcript) {
   if (!transcript) return "NO_ANSWER";
   const t = transcript.toLowerCase();
   if (t.includes("remove") || t.includes("don't call") || t.includes("do not call")) return "REMOVE";
   if (t.includes("call me back") || t.includes("speak to") || t.includes("agent")) return "CALLBACK";
-  if (t.includes("yes") && (t.includes("apprais") || t.includes("interest") || t.includes("sure"))) return "HOT_LEAD";
+  if (t.includes("yes") && (t.includes("apprais") || t.includes("interest") || t.includes("sure") || t.includes("worth"))) return "HOT_LEAD";
   if (t.includes("sms") || t.includes("prices") || t.includes("sold")) return "SEND_INFO";
   if (t.includes("no") || t.includes("not interested") || t.includes("busy")) return "NOT_INTERESTED";
   return "NO_ANSWER";
 }
 
-// ── Send SMS (still uses Twilio) ──
 app.post("/send-sms", async (req, res) => {
   const { to, message, accountSid, authToken, from } = req.body;
   if (!to || !message || !accountSid || !authToken || !from) {
